@@ -825,19 +825,15 @@ TERMINAL defaults to the selected terminal."
 
 
 (defun kkp--set-encoding-flags (terminal flags)
-  "Push FLAGS onto TERMINAL's KKP flag stack.
-This uses the protocol's push command (CSI > flags u), so the previous
-flags can later be restored with `kkp--pop-encoding-flags'.  FLAGS of 0
+  "Set the active KKP flags in TERMINAL to FLAGS with the set command.
+The set command is CSI = flags ; 1 u.  Unlike the push/pop stack commands,
+it replaces the flags on the current stack entry in place.  This works
+uniformly on terminals that implement the flag stack (kitty, ghostty, ...)
+and those that do not (e.g. zellij, which treats a stack pop as a plain
+disable): both directions are just an explicit flag value.  FLAGS of 0
 restores the legacy single-byte encoding of control keys."
   (when (terminal-live-p terminal)
-    (send-string-to-terminal (kkp--csi-escape (format ">%su" flags)) terminal)
-    (kkp--flush-standard-output)))
-
-(defun kkp--pop-encoding-flags (terminal)
-  "Pop one entry off TERMINAL's KKP flag stack (CSI < u).
-Restores the flags that were in effect before the matching push."
-  (when (terminal-live-p terminal)
-    (send-string-to-terminal (kkp--csi-escape "<u") terminal)
+    (send-string-to-terminal (kkp--csi-escape (format "=%s;1u" flags)) terminal)
     (kkp--flush-standard-output)))
 
 (defmacro kkp-with-legacy-keys (&rest body)
@@ -847,6 +843,12 @@ revert to the legacy single-byte encoding of control keys, so that `C-g'
 arrives as the raw `quit-char' byte and can interrupt blocking subprocess
 calls such as a synchronous `call-process'.  The previous KKP flags are
 restored afterwards, even if BODY exits non-locally.
+
+The flags are toggled with the set command (CSI = flags ; 1 u) rather than
+the push/pop stack: we know the exact flags to restore (they are recorded
+in the terminal's `kkp--state'), and the set command restores them
+directly on terminals that lack the flag stack (e.g. zellij), where a
+stack pop would instead leave KKP disabled for good.
 
 This is a no-op when KKP is not active in the selected terminal, and is
 not re-applied for nested forms."
@@ -863,7 +865,9 @@ not re-applied for nested forms."
          (unwind-protect
              (progn ,@body)
            (setf (kkp--state-legacy-active ,state) nil)
-           (kkp--pop-encoding-flags ,term))))))
+           ;; Restore the flags kkp recorded when it enabled the terminal;
+           ;; the body never changes them, so this value is still current.
+           (kkp--set-encoding-flags ,term (kkp--state-enhancements ,state)))))))
 
 (defun kkp-restore-legacy-keys (orig-fun &rest args)
   "Call ORIG-FUN with ARGS while KKP key encoding is temporarily disabled.
