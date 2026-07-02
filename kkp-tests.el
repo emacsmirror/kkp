@@ -358,8 +358,11 @@ runs the teardown hook, and marks the terminal inactive."
 
 (ert-deftest kkp-test/setup-runs-completion-hook ()
   "Issue #15: a matching setup reply runs `kkp-terminal-setup-complete-hook'
-and marks the terminal active."
-  (let* ((reply (kkp-test--events "1u\e[?62c"))  ; flags=1, then device attributes, c
+and marks the terminal active.
+The readback (`\\e[?1u') reports fewer flags than the default enhancements
+request (5), so the recorded state must reflect what the terminal actually
+enabled (1), not what was requested."
+  (let* ((reply (kkp-test--events "1u\e[?62c\e[?1u"))  ; setup reply + DA, then ?u readback
          (i 0)
          (hook-ran nil)
          (state (kkp--make-state))
@@ -378,7 +381,7 @@ and marks the terminal active."
               ((symbol-function 'terminal-parameter) (lambda (&rest _) nil)))
       (kkp--terminal-setup))
     (should hook-ran)
-    (should (kkp--state-enhancements state))))
+    (should (equal (kkp--state-enhancements state) 1))))
 
 (provide 'kkp-tests)
 ;;; kkp-tests.el ends here

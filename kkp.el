@@ -659,9 +659,14 @@ This function code is copied from `xterm--query'."
        (eql 117 (car (last reply)))))
 
 
+(defun kkp--reply-flags (reply)
+  "Return the flag integer encoded in the flags byte of a KKP support REPLY."
+  (- (nth 3 reply) ?0))
+
+
 (defun kkp--reply-enhancements (reply)
   "Return the enhancements encoded in the flags byte of a KKP support REPLY."
-  (kkp--enhancements-from-flags (- (nth 3 reply) ?0)))
+  (kkp--enhancements-from-flags (kkp--reply-flags reply)))
 
 
 (defun kkp--this-terminal-has-active-kkp-p()
@@ -765,8 +770,12 @@ does not have focus, as input from this terminal cannot be reliably read."
               (if (eq enhancement-flag 0)
                   (kkp--verbose "no enhancements to enable (flag=0); skipping")
                 (kkp--verbose "enabling KKP: sending >%su, setting keymaps" enhancement-flag)
-                (setf (kkp--state-enhancements (kkp--ensure-state terminal)) enhancement-flag)
                 (send-string-to-terminal (kkp--csi-escape (format ">%su" enhancement-flag)) terminal)
+                ;; Record the flags the terminal actually enabled, not those we
+                ;; requested: some terminals (e.g. zellij) implement only a
+                ;; subset of the enhancements and enable fewer flags than asked.
+                (setf (kkp--state-enhancements (kkp--ensure-state terminal))
+                      (kkp--reply-flags (kkp--query-terminal-sync "?u" ?u)))
                 (kkp-setup-function-keys terminal)
                 (setf (kkp--state-previous-normal-erase (kkp--ensure-state terminal)) (terminal-parameter terminal 'normal-erase-is-backspace))
                 (dolist (frame (frames-on-display-list terminal))
