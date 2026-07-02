@@ -257,6 +257,35 @@ Output is arranged in aligned columns for clarity."
       (princ (format "  %-30s %s\n" "previous-normal-erase:"
                      (kkp--state-previous-normal-erase state))))))
 
+(defun kkp-debug--princ-terminal-state (terminal &optional live selected)
+  "Print the KKP state of TERMINAL to standard output.
+Always prints kkp's recorded `kkp--state'.  When LIVE is non-nil, also
+query TERMINAL and print what it reports right now, which is useful for
+spotting a desync between the two (e.g. while a `kkp-with-legacy-keys'
+region is active, or if an intermediary stripped the protocol).  A live
+query is only reliable for the selected, focused terminal.  SELECTED marks
+this terminal as the selected one in the header."
+  (princ (format "%-32s %s%s\n" "Terminal:" terminal
+                 (if selected "  <- selected" "")))
+  (princ (format "%-32s %s\n" "Graphic display:"
+                 (if (display-graphic-p terminal) "yes" "no")))
+  (when live
+    ;; A single live `?u' query answers both questions: its shape tells us
+    ;; whether the terminal supports KKP, and its flags byte carries the
+    ;; enabled enhancements.  Guard against errors so the report still
+    ;; renders (a non-replying terminal simply yields a nil reply).
+    (let* ((reply (ignore-errors (kkp--query-terminal-sync "?u" ?u)))
+           (supported-p (kkp--reply-indicates-support-p reply)))
+      (princ (format "%-32s %s\n" "Supports KKP (live query):"
+                     (if supported-p "yes" "no")))
+      (princ (format "%-32s %s\n" "Enabled enhancements (live):"
+                     (if supported-p
+                         (let ((e (kkp--reply-enhancements reply)))
+                           (if e (mapconcat #'symbol-name e " ") "(none)"))
+                       "(terminal does not support KKP)")))))
+  (princ "\nRecorded kkp--state:\n")
+  (kkp-debug--princ-recorded-state (kkp--terminal-state terminal)))
+
 ;;;###autoload
 (defun kkp-debug-show-terminal-state ()
   "Display KKP state for the selected terminal in a help buffer.
@@ -265,48 +294,26 @@ terminal reports live, which is useful for spotting a desync between the
 two (e.g. while a `kkp-with-legacy-keys' region is active, or if an
 intermediary stripped the protocol).
 
-Use `kkp-debug-show-all-terminal-states' for a recorded-only overview of
-every terminal."
+Use `kkp-debug-show-all-terminal-states' for an overview of every
+terminal."
   (interactive)
-  (let* ((terminal (kkp--selected-terminal))
-         (state (kkp--terminal-state terminal))
-         ;; A single live `?u' query answers both questions: its shape tells us
-         ;; whether the terminal supports KKP, and its flags byte carries the
-         ;; enabled enhancements.  Guard against errors so the report still
-         ;; renders (a non-replying terminal simply yields a nil reply).
-         (reply (ignore-errors (kkp--query-terminal-sync "?u" ?u)))
-         (supported-p (kkp--reply-indicates-support-p reply))
-         (supported (if supported-p "yes" "no"))
-         (enabled-live (if supported-p
-                           (let ((e (kkp--reply-enhancements reply)))
-                             (if e (mapconcat #'symbol-name e " ") "(none)"))
-                         "(terminal does not support KKP)")))
-    (with-help-window "*KKP Terminal State*"
-      (princ (format "%-32s %s\n" "Terminal:" terminal))
-      (princ (format "%-32s %s\n" "Graphic display:"
-                     (if (display-graphic-p terminal) "yes" "no")))
-      (princ (format "%-32s %s\n" "Supports KKP (live query):" supported))
-      (princ (format "%-32s %s\n" "Enabled enhancements (live):" enabled-live))
-      (princ "\n")
-      (princ "Recorded kkp--state:\n")
-      (kkp-debug--princ-recorded-state state))))
+  (with-help-window "*KKP Terminal State*"
+    (kkp-debug--princ-terminal-state (kkp--selected-terminal) t t)))
 
 ;;;###autoload
 (defun kkp-debug-show-all-terminal-states ()
-  "Display the recorded KKP `kkp--state' of every live terminal in a help buffer.
-This reads only kkp's recorded state, with no terminal queries, so it is
-safe for terminals other than the selected one (which cannot be queried
-reliably).  Use `kkp-debug-show-terminal-state' to also query the selected
-terminal live."
+  "Display the KKP state of every live terminal in a help buffer.
+The selected terminal is also queried live (as in
+`kkp-debug-show-terminal-state'); the others show only kkp's recorded
+`kkp--state', since a terminal that is not focused cannot be queried
+reliably."
   (interactive)
   (let ((selected (kkp--selected-terminal)))
     (with-help-window "*KKP Terminal States*"
       (dolist (terminal (terminal-list))
-        (princ (format "%-32s %s%s\n" "Terminal:" terminal
-                       (if (eq terminal selected) "  <- selected" "")))
-        (princ (format "%-32s %s\n" "Graphic display:"
-                       (if (display-graphic-p terminal) "yes" "no")))
-        (kkp-debug--princ-recorded-state (kkp--terminal-state terminal))
+        (kkp-debug--princ-terminal-state terminal
+                                         (eq terminal selected)   ; live: selected only
+                                         (eq terminal selected))
         (princ "\n")))))
 
 (provide 'kkp-debug)
