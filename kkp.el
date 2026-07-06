@@ -941,10 +941,12 @@ no-op in terminals where KKP is not active."
          (terminal (kkp--selected-terminal))
          (state (kkp--terminal-state terminal)))
     (when
-        (and (not (and state (kkp--state-setup-visited state)))
+        (and (terminal-live-p terminal)
+             (not (display-graphic-p terminal))
+             (not (and state (kkp--state-setup-visited state)))
              (frame-focus-state frame))
       (kkp--verbose "focus changed to terminal; enabling KKP")
-      (kkp-enable-in-terminal))))
+      (kkp-enable-in-terminal terminal))))
 
 (defun kkp--display-symbol-keys-p (orig-fun &rest args)
   "Advice function for display-symbols-key-p ORIG-FUN with ARGS.
