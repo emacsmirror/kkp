@@ -715,29 +715,40 @@ setup can be applied again later if needed."
 
 
 (defun kkp--terminal-teardown (terminal)
-  "Run procedures to disable KKP in TERMINAL."
-  (kkp--verbose "teardown in terminal (live=%s, was active=%s)"
-                (terminal-live-p terminal)
-                (kkp--active-p terminal))
-  (when
-      (and
-       (terminal-live-p terminal)
-       (kkp--active-p terminal))
-    (kkp--verbose "disabling KKP: sending <u, restoring keymaps")
-    (kkp-teardown-function-keys terminal)
-    (send-string-to-terminal (kkp--csi-escape "<u") terminal)
+  "Run procedures to disable KKP in TERMINAL.
+A dead TERMINAL can be neither queried nor written to: reading its
+parameters or sending the disable sequence signals an error (e.g.
+`wrong-type-argument terminal-live-p').  This happens when
+`delete-terminal-functions' runs the teardown once the terminal is
+already gone (see `kkp--pre-delete-frame').  Any such error is caught and
+ignored, since a dead terminal needs no teardown."
+  (condition-case err
+      (progn
+        (kkp--verbose "teardown in terminal (live=%s, was active=%s)"
+                      (terminal-live-p terminal)
+                      (kkp--active-p terminal))
+        (when
+            (and
+             (terminal-live-p terminal)
+             (kkp--active-p terminal))
+          (kkp--verbose "disabling KKP: sending <u, restoring keymaps")
+          (kkp-teardown-function-keys terminal)
+          (send-string-to-terminal (kkp--csi-escape "<u") terminal)
 
-    (dolist (frame (frames-on-display-list terminal))
-      (with-selected-frame frame
-        (normal-erase-is-backspace-mode (kkp--state-previous-normal-erase (kkp--terminal-state terminal)))
-        (dolist (prefix kkp--key-prefixes)
-          (compat-call define-key input-decode-map (kkp--csi-escape (string prefix)) nil t))
-        (run-hooks 'kkp-terminal-teardown-complete-hook))))
-  ;; Mark the terminal inactive.  Either we just tore it down, or it is not
-  ;; live anyway and should not be considered active.
-  (let ((state (kkp--terminal-state terminal)))
-    (when state
-      (setf (kkp--state-enhancements state) nil))))
+          (dolist (frame (frames-on-display-list terminal))
+            (with-selected-frame frame
+              (normal-erase-is-backspace-mode (kkp--state-previous-normal-erase (kkp--terminal-state terminal)))
+              (dolist (prefix kkp--key-prefixes)
+                (compat-call define-key input-decode-map (kkp--csi-escape (string prefix)) nil t))
+              (run-hooks 'kkp-terminal-teardown-complete-hook))))
+        ;; Mark the terminal inactive.  Either we just tore it down, or it is not
+        ;; live anyway and should not be considered active.
+        (let ((state (kkp--terminal-state terminal)))
+          (when state
+            (setf (kkp--state-enhancements state) nil))))
+    (error
+     (kkp--verbose "teardown skipped (terminal likely dead): %s"
+                   (error-message-string err)))))
 
 
 (defun kkp--terminal-setup ()
