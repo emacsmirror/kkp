@@ -383,5 +383,171 @@ enabled (1), not what was requested."
     (should hook-ran)
     (should (equal (kkp--state-enhancements state) 1))))
 
+;; ---------------------------------------------------------------------------
+;; Xterm startup ordering (issue #21)
+;; ---------------------------------------------------------------------------
+
+(defmacro kkp-test--with-xterm (&rest body)
+  "Run BODY with real xterm query handlers and fake terminal I/O.
+REPLY supplies bytes to `read-event'; ON-READ can request setup or change
+focus while xterm reads. SENT records writes and their target terminals."
+  (declare (indent 0) (debug t))
+  `(let* ((state (kkp--make-state))
+          (other-state (kkp--make-state))
+          (states (list (cons 'fake-term state) (cons 'other-term other-state)))
+          (current-terminal 'fake-term)
+          (input-decode-map (make-sparse-keymap))
+          (unread-command-events nil)
+          (global-kkp-mode nil)
+          (xterm-query-timeout nil)
+          (reply nil)
+          (on-read nil)
+          (sent nil))
+     (cl-letf (((symbol-function 'kkp--selected-terminal)
+                (lambda () current-terminal))
+               ((symbol-function 'kkp--terminal-state)
+                (lambda (terminal) (cdr (assq terminal states))))
+               ((symbol-function 'kkp--ensure-state)
+                (lambda (terminal) (cdr (assq terminal states))))
+               ((symbol-function 'terminal-live-p) (lambda (_) t))
+               ((symbol-function 'display-graphic-p) (lambda (&rest _) nil))
+               ((symbol-function 'terminal-list) (lambda () '(fake-term other-term)))
+               ((symbol-function 'terminal-parameter) (lambda (&rest _) nil))
+               ((symbol-function 'frames-on-display-list)
+                (lambda (_) (list (selected-frame))))
+               ((symbol-function 'send-string-to-terminal)
+                (lambda (string &optional terminal)
+                  (push (cons string terminal) sent)
+                  (when (equal string "\e[?u")
+                    (setq reply (append reply (kkp-test--events "\e[?5u"))))))
+               ((symbol-function 'read-event)
+                (lambda (&rest _)
+                  (when on-read
+                    (let ((callback on-read))
+                      (setq on-read nil)
+                      (funcall callback)))
+                  (pop reply)))
+               ((symbol-function 'discard-input) #'ignore)
+               ((symbol-function 'kkp-setup-function-keys) #'ignore)
+               ((symbol-function 'kkp-teardown-function-keys) #'ignore)
+               ((symbol-function 'normal-erase-is-backspace-mode) #'ignore))
+       (unwind-protect
+           (progn ,@body)
+         (global-kkp-mode -1)))))
+
+(defun kkp-test--check-xterm-handoff (prefix version-reply)
+  "Check that xterm's PREFIX handler finishes before KKP setup.
+VERSION-REPLY contains the bytes after PREFIX."
+  (kkp-test--with-xterm
+    (xterm--query "\e[>0c"
+                  '(("\e[?" . xterm--version-handler)
+                    ("\e[>" . xterm--version-handler)))
+    (let ((xterm-handler (lookup-key input-decode-map prefix)))
+      (kkp-enable-in-terminal 'fake-term)
+      (kkp-enable-in-terminal 'fake-term)
+      ;; Re-entry must neither overwrite xterm nor send a second query.
+      (should (eq (lookup-key input-decode-map prefix) xterm-handler))
+      (should (equal (mapcar #'car sent) '("\e[>0c")))
+      (should (eq (kkp--state-setup-started state) 'waiting-for-xterm))
+      (setq reply (kkp-test--events version-reply))
+      (funcall xterm-handler)
+      (should-not reply)
+      (should (eq (kkp--state-setup-started state) t))
+      (should (equal (mapcar #'car sent) '("\e[?u\e[c" "\e[>0c")))
+      ;; The actual xterm cleanup must leave KKP's new handler intact.
+      (should (functionp (lookup-key input-decode-map "\e[?")))
+      (setq reply (kkp-test--events "0u\e[?62;4;22;28;52c"))
+      (funcall (lookup-key input-decode-map "\e[?"))
+      (should-not reply)
+      (should (= (kkp--state-enhancements state) 5))
+      (should-not (kkp--state-setup-started state)))))
+
+(ert-deftest kkp-test/xterm-handoff--secondary-da ()
+  "Issue #21: xterm's secondary DA cleanup cannot erase KKP's handler."
+  (kkp-test--check-xterm-handoff "\e[>" "0;200;0c"))
+
+(ert-deftest kkp-test/xterm-handoff--primary-da-fallback ()
+  "Keep xterm's primary DA fallback, used by terminals such as Terminal.app."
+  (kkp-test--check-xterm-handoff "\e[?" "62;4;22;28;52c"))
+
+(ert-deftest kkp-test/xterm-handoff--enable-while-reading ()
+  "A setup request during xterm's read waits even after its bindings are gone."
+  (kkp-test--with-xterm
+    (global-kkp-mode 1)
+    (xterm--query "\e[>0c"
+                  '(("\e[?" . xterm--version-handler)
+                    ("\e[>" . xterm--version-handler)))
+    (setq reply (kkp-test--events "0;200;0c")
+          on-read (lambda ()
+                    (should-not (lookup-key input-decode-map "\e[?"))
+                    (kkp-enable-in-terminal 'fake-term)
+                    (should (eq (kkp--state-setup-started state) 'waiting-for-xterm))
+                    (should (equal (mapcar #'car sent) '("\e[>0c")))))
+    (funcall (lookup-key input-decode-map "\e[>"))
+    (should-not (kkp--state-xterm-version-running state))
+    (should (equal (mapcar #'car sent) '("\e[?u\e[c" "\e[>0c")))))
+
+(ert-deftest kkp-test/xterm-handoff--focus-changes-during-reply ()
+  "Complete setup on the originating terminal when reading changes focus."
+  (kkp-test--with-xterm
+    (xterm--query "\e[>0c"
+                  '(("\e[?" . xterm--version-handler)
+                    ("\e[>" . xterm--version-handler)))
+    (kkp-enable-in-terminal 'fake-term)
+    (setf (kkp--state-setup-started other-state) 'waiting-for-xterm)
+    (setq reply (kkp-test--events "0;200;0c")
+          on-read (lambda () (setq current-terminal 'other-term)))
+    (funcall (lookup-key input-decode-map "\e[>"))
+    (should (eq (cdr (assoc "\e[?u\e[c" sent)) 'fake-term))
+    (should (eq (kkp--state-setup-started state) t))
+    (should (eq (kkp--state-setup-started other-state) 'waiting-for-xterm))))
+
+(ert-deftest kkp-test/xterm-handoff--no-pending-query ()
+  "Start immediately when xterm's version detection has already completed."
+  (kkp-test--with-xterm
+    (kkp-enable-in-terminal 'fake-term)
+    (should (equal (mapcar #'car sent) '("\e[?u\e[c")))
+    (should (eq (kkp--state-setup-started state) t))))
+
+(ert-deftest kkp-test/xterm-handoff--disable-clears-wait ()
+  "Removing the handoff advice also clears setup waiting for that callback."
+  (kkp-test--with-xterm
+    (global-kkp-mode 1)
+    (xterm--query "\e[>0c"
+                  '(("\e[?" . xterm--version-handler)
+                    ("\e[>" . xterm--version-handler)))
+    (kkp-enable-in-terminal 'fake-term)
+    (global-kkp-mode -1)
+    (should-not (kkp--state-setup-started state))
+    (setq reply (kkp-test--events "0;200;0c"))
+    (funcall (lookup-key input-decode-map "\e[>"))
+    (should (equal (mapcar #'car sent) '("\e[>0c")))))
+
+(ert-deftest kkp-test/xterm-handoff--nested-handler ()
+  "A nested handler must not start KKP while the outer handler still reads."
+  (kkp-test--with-xterm
+    (should
+     (eq (kkp--after-xterm-version
+          (lambda ()
+            (kkp-enable-in-terminal 'fake-term)
+            (should (eq (kkp--after-xterm-version (lambda () 'inner)) 'inner))
+            (should-not sent)
+            'outer))
+         'outer))
+    (should (equal (mapcar #'car sent) '("\e[?u\e[c")))))
+
+(ert-deftest kkp-test/xterm-handoff--handler-error ()
+  "A failed xterm handler must allow setup to be canceled and retried."
+  (kkp-test--with-xterm
+    (should-error
+     (kkp--after-xterm-version
+      (lambda ()
+        (kkp-enable-in-terminal 'fake-term)
+        (error "Failed xterm reply"))))
+    (should-not sent)
+    (kkp-disable-in-terminal)
+    (kkp-enable-in-terminal 'fake-term)
+    (should (equal (mapcar #'car sent) '("\e[?u\e[c")))))
+
 (provide 'kkp-tests)
 ;;; kkp-tests.el ends here

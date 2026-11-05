@@ -353,7 +353,8 @@ A terminal carries no state until KKP first touches it; the struct then
 lives and dies with the terminal, so there are no global lists of terminals
 to keep in sync."
   (enhancements nil)            ; flag integer of activated enhancements; nil when inactive
-  (setup-started nil)           ; query sent, awaiting the terminal's reply
+  (setup-started nil)           ; nil, waiting-for-xterm, or t (KKP query sent)
+  (xterm-version-running nil)   ; xterm has removed its bindings but is still reading
   (setup-visited nil)           ; enable attempted since `global-kkp-mode' turned on
   (suspended nil)               ; was active, suspended before a (tty) suspend, awaiting resume
   (legacy-active nil)           ; encoding temporarily reverted to legacy (see `kkp-with-legacy-keys')
@@ -745,7 +746,9 @@ ignored, since a dead terminal needs no teardown."
         ;; live anyway and should not be considered active.
         (let ((state (kkp--terminal-state terminal)))
           (when state
-            (setf (kkp--state-enhancements state) nil))))
+            (setf (kkp--state-enhancements state) nil)
+            (when (eq (kkp--state-setup-started state) 'waiting-for-xterm)
+              (setf (kkp--state-setup-started state) nil)))))
     (error
      (kkp--verbose "teardown skipped (terminal likely dead): %s"
                    (error-message-string err)))))
@@ -803,10 +806,13 @@ does not have focus, as input from this terminal cannot be reliably read."
 
 
 (defun kkp--disable-in-active-terminals()
-  "In all terminals with active KKP, pop the previously pushed enhancement flag."
+  "Disable active KKP and cancel setup waiting for xterm in all terminals."
   (dolist (terminal (terminal-list))
-    (when (kkp--active-p terminal)
-      (kkp--terminal-teardown terminal))))
+    (let ((state (kkp--terminal-state terminal)))
+      (when (and state
+                 (or (kkp--state-enhancements state)
+                     (eq (kkp--state-setup-started state) 'waiting-for-xterm)))
+        (kkp--terminal-teardown terminal)))))
 
 
 (defun kkp--suspend-in-terminal (&optional terminal)
@@ -904,6 +910,22 @@ no-op in terminals where KKP is not active."
   (kkp-with-legacy-keys (apply orig-fun args)))
 
 
+(defun kkp--after-xterm-version (orig-fun &rest args)
+  "Run waiting KKP setup after ORIG-FUN finishes xterm version detection.
+Capture the terminal before calling ORIG-FUN with ARGS, since reading its
+reply can change the selected frame.  Wait for the complete handler,
+including any follow-up queries, before sending KKP's query."
+  (let* ((terminal (kkp--selected-terminal))
+         (state (kkp--ensure-state terminal)))
+    (prog1
+        (cl-letf (((kkp--state-xterm-version-running state) t))
+          (apply orig-fun args))
+      (when (and (terminal-live-p terminal)
+                 (not (kkp--state-xterm-version-running state))
+                 (eq (kkp--state-setup-started state) 'waiting-for-xterm))
+        (setf (kkp--state-setup-started state) nil)
+        (kkp-enable-in-terminal terminal)))))
+
 (cl-defun kkp-enable-in-terminal (&optional (terminal (kkp--selected-terminal)))
   "Try to enable KKP support in Emacs running in the TERMINAL."
   (interactive)
@@ -920,13 +942,22 @@ no-op in terminals where KKP is not active."
         (kkp--verbose "skipping enable: KKP already active in this terminal"))
        (t
         (kkp--verbose "enabling KKP in terminal...")
-        ;; NOTE: to avoid race conditions, we set the setup-started flag
-        ;; here to not send the query multiple times to the terminal
+        ;; Install the handoff for direct calls as well as global mode.
+        (advice-add 'xterm--version-handler :around #'kkp--after-xterm-version)
+        ;; Guard re-entry while waiting for either xterm or the KKP reply.
         (setf (kkp--state-setup-started state) t)
-        ;; https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol
-        ;; query for the current progressive enhancements together with the primary device attributes
-        (kkp--query-terminal-async "?u\e[c"
-                                   '(("\e[?" . kkp--terminal-setup)) terminal))))))
+        ;; Xterm removes its CSI ? binding before reading the whole reply.
+        ;; Its advice resumes setup once both registration and reading finish.
+        (if (or (kkp--state-xterm-version-running state)
+                (with-selected-frame (car (frames-on-display-list terminal))
+                  (functionp (lookup-key input-decode-map "\e[?"))))
+            (progn
+              (setf (kkp--state-setup-started state) 'waiting-for-xterm)
+              (kkp--verbose "waiting for xterm version detection before KKP setup"))
+          ;; Query the progressive enhancements together with primary DA.
+          ;; https://sw.kovidgoyal.net/kitty/keyboard-protocol/#detection-of-support-for-this-protocol
+          (kkp--query-terminal-async "?u\e[c"
+                                     '(("\e[?" . kkp--terminal-setup)) terminal)))))))
 
 ;;;###autoload
 (defun kkp-disable-in-terminal ()
@@ -963,6 +994,8 @@ This ensures display-symbols-key-p returns non nil in a terminal with KKP enable
   :group 'kkp
   (cond
    (global-kkp-mode
+    ;; Track xterm's handler even if a focus event requests KKP while it reads.
+    (advice-add 'xterm--version-handler :around #'kkp--after-xterm-version)
     ;; if terminal has KKP enabled, it supports symbol names as keys
     (advice-add 'display-symbol-keys-p :around #'kkp--display-symbol-keys-p)
     ;; call setup for future terminals to be opened
@@ -997,6 +1030,7 @@ This ensures display-symbols-key-p returns non nil in a terminal with KKP enable
     (when (terminal-parameter (kkp--selected-terminal) 'terminal-initted)
       (kkp-enable-in-terminal)))
    (t
+    (advice-remove 'xterm--version-handler #'kkp--after-xterm-version)
     (advice-remove 'display-symbol-keys-p #'kkp--display-symbol-keys-p)
     (kkp--disable-in-active-terminals)
     (remove-hook 'tty-setup-hook #'kkp-enable-in-terminal)

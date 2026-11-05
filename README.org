@@ -66,6 +66,12 @@ This can be helpful in the scenario below where only =disambiguate-escape-codes=
 
 Set =kkp-verbose= to non-nil to echo KKP state and helpful messages to the echo area (e.g. when querying the terminal, enabling/tearing down, or when the terminal does not reply). Useful for debugging slow SSH or strange terminals.
 
+During startup, KKP waits for any pending xterm version query to finish before
+querying the terminal itself. This prevents startup replies from being inserted
+into the buffer ([[https://github.com/benotn/kkp/issues/21][issue #21]]). Waiting does not block Emacs. If the terminal never
+answers xterm's query, KKP remains inactive; =kkp-terminal-query-timeout= applies
+to reading replies, not to this wait.
+
 *** =C-g= and blocking subprocesses
 
 While KKP is active, the terminal sends =C-g= as an escape sequence (e.g. =\e[103;5u=) instead of the raw =quit-char= (7) byte.
